@@ -1,6 +1,5 @@
 var shasum = require('shasum')
 var protobuf = require('protocol-buffers')
-var lru = require('lru-cache')
 var mutexify = require('mutexify')
 var through = require('through2')
 var fs = require('fs')
