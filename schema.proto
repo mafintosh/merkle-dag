@@ -1,0 +1,6 @@
+message Node {
+  repeated string prev = 1;
+  repeated string next = 2;
+  required bytes value = 3;
+  required string key = 4;
+}
