@@ -1,101 +1,116 @@
 var shasum = require('shasum')
 var protobuf = require('protocol-buffers')
-var mutexify = require('mutexify')
 var through = require('through2')
+var from = require('from2')
 var fs = require('fs')
 
 var schema = protobuf(fs.readFileSync(__dirname+'/schema.proto'))
 var noop = function() {}
 
-var TAIL = 'tail!'
 var HEAD = 'head!'
 var NODE = 'node!'
+var BACK = 'back!'
 
 var Merkle = function(db) {
   if (!(this instanceof Merkle)) return new Merkle(db)
   this.db = db
-  this.lock = mutexify()
+}
+
+Merkle.prototype.nodes = function(head, opts) {
+  if (!opts) opts = {}
+
+  var self = this
+  var queue = [head]
+  var limit = opts.limit || Infinity
+
+  return from.obj(function(size, cb) {
+    if (!queue.length || !limit) return cb(null, null)
+    self.get(queue.shift(), function(err, node) {
+      if (err) return cb(err)
+      queue.push.apply(queue, node.links)
+      limit--
+      cb(null, node)
+    })
+  })
+}
+
+Merkle.prototype.add = function(links, value, cb) {
+  if (!cb) cb = noop
+  if (!links) links = []
+  if (!Array.isArray(links)) links = [links]
+  if (!Buffer.isBuffer(value)) value = new Buffer(value)
+
+  var self = this
+  var batch = []
+  var key = shasum(shasum(value)+links.join(''))
+
+  var node = {
+    key: key,
+    links: links,
+    value: value
+  }
+
+  batch.push({type:'put', key:NODE+key, value:schema.Node.encode(node)})
+  batch.push({type:'put', key:HEAD+key, value:key})
+
+  var flush = function() {
+    self.db.batch(batch, function(err) {
+      if (err) return cb(err)
+      cb(null, node)
+    })
+  }
+
+  var loop = function(i) {
+    if (i === links.length) return flush()
+    self.db.get(NODE+links[i], function(err) {
+      if (err) return cb(err)
+      batch.push({type:'del', key:HEAD+links[i]})
+      loop(i+1)
+    })
+  }
+
+  loop(0)
+}
+
+Merkle.prototype.heads = function(opts) {
+  if (!opts) opts = {}
+  return this.db.createValueStream({
+    gt: HEAD,
+    lt: HEAD+'\xff',
+    valueEncoding: 'utf-8',
+    limit: opts.limit
+  })
 }
 
 Merkle.prototype.get = function(key, cb) {
-  this.db.get(NODE+key, {valueEncoding:'binary'}, function(err, node) {
+  this.db.get(NODE+key, {valueEncoding:'binary'}, function(err, value) {
     if (err) return cb(err)
-    cb(null, schema.Node.decode(node))
+    cb(null, schema.Node.decode(value))
   })
 }
 
-var range = function(self, prefix) {
-  var rs = db.createReadStream({
-    gt: prefix,
-    lt: prefix+'\xff',
-    valueEncoding: 'utf-8'
-  })
+if (module !== require.main) return
 
-  var format = through.obj(function(data, enc, cb) {
-    self.get(data.value)
-    cb(null, schema.Node.decode(data.value))
-  })
+var after = require('after-all')
+var memdb = require('memdb')
 
-  return rs.pipe(format)
-}
-
-Merkle.prototype.tails = function() {
-  return range(this.db, TAIL)
-}
-
-Merkle.prototype.heads = function() {
-  return range(this.db, HEAD)
-}
-
-Merkle.prototype.add = function(prev, value, cb) {
-  if (!cb) cb = noop
-  if (!prev) prev = []
-  if (!Array.isArray(prev)) prev = [prev]
-  if (typeof value === 'string') value = new Buffer(value)
-
-  var self = this
-  var hash = shasum(value)
-  var key = shasum(hash+prev.join(''))
-  var node = {key:key, value:value, prev:prev, next:[]}
-  var batch = []
-
-  this.lock(function(release) {
-    if (!prev.length) batch.push({type:'put', key:TAIL+key, value:NODE+key})
-
-    var flush = function() {
-      batch.push({type:'put', key:NODE+key, value:schema.Node.encode(node)})
-      batch.push({type:'put', key:HEAD+key, value:key})
-      self.db.batch(batch, function(err) {
-        if (err) return release(cb, err)
-        release(cb, null, node)
-      })
-    }
-
-    var loop = function(i) {
-      if (prev.length === i) return flush()
-      self.get(prev[i], function(err, node) {
-        if (err) return release(cb, err)
-        node.next.push(key)
-        if (node.next.length === 1) batch.push({type:'del', key:HEAD+node.key})
-        else node.next.sort()
-        batch.push({type:'put', key:NODE+node.key, value:schema.Node.encode(node)})
-        loop(i+1)
-      })
-    }
-
-    loop(0)
-  })
-}
-
-module.exports = Merkle
-
-return
-
-var m = Merkle(require('level')('test.db'))
+var m = Merkle(memdb())
 
 m.add(null, 'hello', function(err, node) {
-  m.add(node.key, 'world', function() {
-    m.heads().on('data', console.log)
+  var next = after(function() {
+    m.heads({limit:1}).on('data', function(head) {
+      m.nodes(head).on('data', console.log)
+    })
   })
+
+  m.add(node.key, 'verden', next())
+  m.add(node.key, 'world', next())
+  m.add(node.key, 'mundo', next())
+  m.add(node.key, 'welt', next())
 })
 
+// -> h1
+
+// <- h1 ==> h2,h3,h4
+
+// h1 ->
