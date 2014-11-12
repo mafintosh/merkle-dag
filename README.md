@@ -28,6 +28,25 @@ graph.add(null, 'hello', function(err, node) {
 })
 ```
 
+To get the `heads` of the graph (nodes that no one has a link to) use `graph.heads()`
+
+``` js
+// graph.heads() returns a stream of hashes of the heads
+var heads = graph.heads()
+
+heads.on('data', function(head) {
+  console.log('head:', head)
+})
+```
+
+Optionally you can provide a callback which will be called a list of heads
+
+``` js
+graph.heads(function(err, heads) {
+  console.log(heads) // an array of heads
+})
+```
+
 ## License
 
 MIT

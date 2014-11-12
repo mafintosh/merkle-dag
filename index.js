@@ -2,10 +2,24 @@ var shasum = require('shasum')
 var protobuf = require('protocol-buffers')
 var through = require('through2')
 var from = require('from2')
+var eos = require('end-of-stream')
 var fs = require('fs')
 
 var schema = protobuf(fs.readFileSync(__dirname+'/schema.proto'))
+
 var noop = function() {}
+
+var collect = function(stream, cb) {
+  if (!cb) return stream
+  var result = []
+  stream.on('data', function(data) {
+    result.push(data)
+  })
+  eos(stream, function(err) {
+    if (err) return cb(err)
+    cb(null, result)
+  })
+}
 
 var HEAD = 'head!'
 var NODE = 'node!'
@@ -71,14 +85,18 @@ Merkle.prototype.add = function(links, value, cb) {
   loop(0)
 }
 
-Merkle.prototype.heads = function(opts) {
+Merkle.prototype.heads = function(opts, cb) {
+  if (typeof opts === 'function') return this.heads(null, opts)
   if (!opts) opts = {}
-  return this.db.createValueStream({
+
+  var rs = this.db.createValueStream({
     gt: HEAD,
     lt: HEAD+'\xff',
     valueEncoding: 'utf-8',
     limit: opts.limit
   })
+
+  return collect(rs, cb)
 }
 
 Merkle.prototype.get = function(key, cb) {
@@ -115,6 +133,7 @@ m.add(null, 'hi', function(err, hi) {
     m.add(node.key, 'verden', function(err, verden) {
       m.add(node.key, 'world', function(err, world) {
         m.add([verden.key, world.key], 'welt', print)
+        m.heads(console.log)
       })
     })
   })
