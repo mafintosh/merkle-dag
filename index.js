@@ -9,7 +9,6 @@ var noop = function() {}
 
 var HEAD = 'head!'
 var NODE = 'node!'
-var BACK = 'back!'
 
 var Merkle = function(db) {
   if (!(this instanceof Merkle)) return new Merkle(db)
@@ -96,17 +95,27 @@ var memdb = require('memdb')
 
 var m = Merkle(memdb())
 
-m.add(null, 'hello', function(err, node) {
-  var next = after(function() {
-    m.heads({limit:1}).on('data', function(head) {
-      m.nodes(head).on('data', console.log)
+var truncate = function(key) {
+  return key.slice(0, 10)
+}
+
+var print = function() {
+  m.heads({limit:1}).on('data', function(head) {
+    m.nodes(head).on('data', function(data) {
+      console.log(truncate(data.key)+' ['+data.links.map(truncate).join(' ')+']')
     })
   })
+}
+console.log('...')
 
-  m.add(node.key, 'verden', next())
-  m.add(node.key, 'world', next())
-  m.add(node.key, 'mundo', next())
-  m.add(node.key, 'welt', next())
+m.add(null, 'hi', function(err, hi) {
+  m.add(hi.key, 'hello', function(err, node) {
+    m.add(node.key, 'verden', function(err, verden) {
+      m.add(node.key, 'world', function(err, world) {
+        m.add([verden.key, world.key], 'welt', print)
+      })
+    })
+  })
 })
 
 // -> h1
