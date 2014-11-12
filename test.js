@@ -21,3 +21,16 @@ tape('add unknown link', function(t) {
     t.end()
   })
 })
+
+tape('get heads', function(t) {
+  var graph = merkle(memdb())
+
+  graph.add(null, 'hello', function(err, node) {
+    graph.add([node.key], 'world', function(err, head) {
+      graph.heads(function(err, heads) {
+        t.same(heads, [head.key], 'heads match')
+        t.end()
+      })
+    })
+  })
+})
