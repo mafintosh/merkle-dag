@@ -4,7 +4,6 @@
   "description": "Merkle DAG on top of LevelDB",
   "main": "index.js",
   "dependencies": {
-    "mutexify": "^1.0.1",
     "protocol-buffers": "^2.4.1",
     "shasum": "^1.0.0",
     "through2": "^0.6.3"
