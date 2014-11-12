@@ -88,6 +88,8 @@ Merkle.prototype.get = function(key, cb) {
   })
 }
 
+module.exports = Merkle
+
 if (module !== require.main) return
 
 var after = require('after-all')
