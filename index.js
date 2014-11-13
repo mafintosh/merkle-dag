@@ -8,6 +8,7 @@ var fs = require('fs')
 var schema = protobuf(fs.readFileSync(__dirname+'/schema.proto'))
 
 var noop = function() {}
+var prebatch = function(batch, cb) { cb(null, batch) }
 
 var collect = function(stream, cb) {
   if (!cb) return stream
@@ -24,9 +25,11 @@ var collect = function(stream, cb) {
 var HEAD = 'head!'
 var NODE = 'node!'
 
-var Merkle = function(db) {
-  if (!(this instanceof Merkle)) return new Merkle(db)
+var Merkle = function(db, opts) {
+  if (!(this instanceof Merkle)) return new Merkle(db, opts)
+  if (!opts) opts = {}
   this.db = db
+  this.prebatch = opts.prebatch || prebatch
 }
 
 Merkle.prototype.nodes = function(head, opts) {
@@ -67,9 +70,12 @@ Merkle.prototype.add = function(links, value, cb) {
   batch.push({type:'put', key:HEAD+key, value:key})
 
   var flush = function() {
-    self.db.batch(batch, function(err) {
+    self.prebatch(batch, function(err, batch) {
       if (err) return cb(err)
-      cb(null, node)
+      self.db.batch(batch, function(err) {
+        if (err) return cb(err)
+        cb(null, node)
+      })
     })
   }
 
@@ -110,10 +116,13 @@ module.exports = Merkle
 
 if (module !== require.main) return
 
-var after = require('after-all')
 var memdb = require('memdb')
-
-var m = Merkle(memdb())
+var m = Merkle(memdb(), {
+  prebatch: function(batch, cb) {
+    console.log('prebatch', batch)
+    cb(null, batch)
+  }
+})
 
 var truncate = function(key) {
   return key.slice(0, 10)
@@ -126,7 +135,6 @@ var print = function() {
     })
   })
 }
-console.log('...')
 
 m.add(null, 'hi', function(err, hi) {
   m.add(hi.key, 'hello', function(err, node) {
@@ -138,9 +146,3 @@ m.add(null, 'hi', function(err, hi) {
     })
   })
 })
-
-// -> h1
-
-// <- h1 ==> h2,h3,h4
-
-// h1 ->
