@@ -1,6 +1,6 @@
 {
   "name": "merkle-dag",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "Merkle DAG on top of LevelDB",
   "main": "index.js",
   "dependencies": {
