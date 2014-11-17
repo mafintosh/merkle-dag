@@ -1,148 +1,172 @@
+var mutexify = require('mutexify')
+var lexint = require('lexicographic-integer')
 var shasum = require('shasum')
-var protobuf = require('protocol-buffers')
-var through = require('through2')
+var multistream = require('multistream')
 var from = require('from2')
-var eos = require('end-of-stream')
+var protobuf = require('protocol-buffers')
+var collect = require('stream-collector')
+var LRU = require('lru-cache')
+var through = require('through2')
+var pump = require('pump')
 var fs = require('fs')
-
-var schema = protobuf(fs.readFileSync(__dirname+'/schema.proto'))
-
-var noop = function() {}
-var prebatch = function(batch, cb) { cb(null, batch) }
-
-var collect = function(stream, cb) {
-  if (!cb) return stream
-  var result = []
-  stream.on('data', function(data) {
-    result.push(data)
-  })
-  eos(stream, function(err) {
-    if (err) return cb(err)
-    cb(null, result)
-  })
-}
 
 var HEAD = 'head!'
 var NODE = 'node!'
+var CHANGE = 'change!'
 
-var Merkle = function(db, opts) {
-  if (!(this instanceof Merkle)) return new Merkle(db, opts)
-  if (!opts) opts = {}
-  this.db = db
-  this.prebatch = opts.prebatch || prebatch
-}
+var messages = protobuf(fs.readFileSync(__dirname+'/schema.proto'))
+var noop = function() {}
 
-Merkle.prototype.nodes = function(head, opts) {
-  if (!opts) opts = {}
-
-  var self = this
-  var queue = [head]
-  var limit = opts.limit || Infinity
-
-  return from.obj(function(size, cb) {
-    if (!queue.length || !limit) return cb(null, null)
-    self.get(queue.shift(), function(err, node) {
-      if (err) return cb(err)
-      queue.push.apply(queue, node.links)
-      limit--
-      cb(null, node)
-    })
+var nextTick = function(cb, err, val) {
+  process.nextTick(function() {
+    cb(err, val)
   })
 }
 
-Merkle.prototype.add = function(links, value, cb) {
-  if (!cb) cb = noop
-  if (!links) links = []
-  if (!Array.isArray(links)) links = [links]
-  if (!Buffer.isBuffer(value)) value = new Buffer(value)
+var Merkle = function(db) {
+  if (!(this instanceof Merkle)) return new Merkle(db)
+  this._cache = LRU(100)
+  this._db = db
+  this._clock = 0
+  this._lock = mutexify()
+  this._onflush = []
+}
 
-  var self = this
-  var batch = []
-  var key = shasum(shasum(value)+links.join(''))
+var init = function(self, cb) {
+  if (self._clock) return cb()
+  var rs = self._db.createKeyStream({gt:CHANGE, lt:CHANGE+'\xff', limit:1, reverse:true})
+  collect(rs, function(err, keys) {
+    if (err) return cb(err)
+    self._clock = keys.length ? lexint.unpack(keys[0].slice(CHANGE.length), 'hex') : 0
+    cb()
+  })
+}
 
-  var node = {
-    key: key,
-    links: links,
-    value: value
-  }
-
-  batch.push({type:'put', key:NODE+key, value:schema.Node.encode(node)})
-  batch.push({type:'put', key:HEAD+key, value:key})
-
-  var flush = function() {
-    self.prebatch(batch, function(err, batch) {
-      if (err) return cb(err)
-      self.db.batch(batch, function(err) {
-        if (err) return cb(err)
-        cb(null, node)
-      })
-    })
-  }
-
+var verify = function(self, links, cb) {
   var loop = function(i) {
-    if (i === links.length) return flush()
-    self.db.get(NODE+links[i], function(err) {
-      if (err) return cb(err)
-      batch.push({type:'del', key:HEAD+links[i]})
+    if (i === links.length) return cb()
+    self.get(links[i], function(err) {
+      if (err) return cb(new Error('Link '+links[i]+' does not exist'))
       loop(i+1)
     })
   }
 
-  loop(0)
+  loop(0)  
+}
+
+var write = function(self, node, cb) {
+  // quick-n-dirty impl with a global memory lock
+  // can easily be optimized at a later point for faster bulk writes
+
+  self._lock(function(release) {
+    init(self, function(err) {
+      if (err) return release(cb, err)
+      verify(self, node.links, function(err) {
+        if (err) return release(cb, err)
+        
+        node.change = self._clock+1
+
+        var batch = []
+        for (var i = 0; i < node.links.length; i++) batch.push({type:'del', key:HEAD+node.links[i]})
+        batch.push({type:'put', key:HEAD+node.key, value:node.key})
+        batch.push({type:'put', key:CHANGE+lexint.pack(node.change, 'hex'), value:node.key})
+        batch.push({type:'put', key:NODE+node.key, value:messages.Node.encode(node)})
+
+        self._db.batch(batch, function(err) {
+          if (err) return release(cb, err)
+          self._clock = node.change
+          self._cache.set(node.key, node)
+          while (self._onflush.length) self._onflush.shift()()
+          release(cb, null, node)
+        })
+      })
+    })
+  })
 }
 
 Merkle.prototype.heads = function(opts, cb) {
   if (typeof opts === 'function') return this.heads(null, opts)
   if (!opts) opts = {}
 
-  var rs = this.db.createValueStream({
+  var rs = this._db.createValueStream({
     gt: HEAD,
     lt: HEAD+'\xff',
-    valueEncoding: 'utf-8',
-    limit: opts.limit
+    limit: opts.limit,
+    reverse: opts.reverse
   })
+
+  var self = this
+  var format = function(key, enc, cb) {
+    self.get(key, cb)
+  }
+
+  return collect(pump(rs, through.obj(format)), cb)
+}
+
+var wait = function(self, read, cb) {
+  self._onflush.push(function() {
+    read(1, cb)
+  })
+}
+
+Merkle.prototype.changes = function(opts, cb) {
+  if (typeof opts === 'function') return this.changes(null, opts)
+  if (!opts) opts = {}
+
+  var rs = this._db.createValueStream({
+    gt: CHANGE+lexint.pack(opts.since || 0, 'hex'),
+    lt: CHANGE+'\xff',
+    limit: opts.limit,
+    reverse: opts.reverse
+  })
+
+  var self = this
+  var prev = 0
+  var format = function(key, enc, cb) {
+    self.get(key, function(err, node) {
+      if (err) return cb(err)
+      prev = node.change
+      cb(null, node)
+    })
+  }
+
+  var read = function(size, cb) {
+    if (prev >= self._clock) return wait(self, read, cb)
+    self._db.get(CHANGE+lexint.pack(prev+1, 'hex'), function(err, key) {
+      if (err) return cb(err)
+      format(key, null, cb)
+    })
+  }
+
+  rs = pump(rs, through.obj(format))
+  if (opts.live) rs = multistream.obj([rs, from.obj(read)])
 
   return collect(rs, cb)
 }
 
 Merkle.prototype.get = function(key, cb) {
-  this.db.get(NODE+key, {valueEncoding:'binary'}, function(err, value) {
+  var self = this
+  var val = this._cache.get(key)
+  if (val) return nextTick(cb, null, val)
+  this._db.get(NODE+key, {valueEncoding:'binary'}, function(err, data) {
     if (err) return cb(err)
-    cb(null, schema.Node.decode(value))
+    val = messages.Node.decode(data)
+    self._cache.set(key, val)
+    cb(null, val)
   })
 }
+
+Merkle.prototype.add = function(links, value, cb) {
+  if (typeof value === 'string') value = new Buffer(value)
+  if (!links) links = []
+  if (!Array.isArray(links)) links = [links]
+
+  var key = shasum(shasum(value)+links.sort().join(''))
+  var node = {key:key, change:0, value:value, links:links}
+
+  write(this, node, cb || noop)
+
+  return node
+} 
 
 module.exports = Merkle
-
-if (module !== require.main) return
-
-var memdb = require('memdb')
-var m = Merkle(memdb(), {
-  prebatch: function(batch, cb) {
-    console.log('prebatch', batch)
-    cb(null, batch)
-  }
-})
-
-var truncate = function(key) {
-  return key.slice(0, 10)
-}
-
-var print = function() {
-  m.heads({limit:1}).on('data', function(head) {
-    m.nodes(head).on('data', function(data) {
-      console.log(truncate(data.key)+' ['+data.links.map(truncate).join(' ')+']')
-    })
-  })
-}
-
-m.add(null, 'hi', function(err, hi) {
-  m.add(hi.key, 'hello', function(err, node) {
-    m.add(node.key, 'verden', function(err, verden) {
-      m.add(node.key, 'world', function(err, world) {
-        m.add([verden.key, world.key], 'welt', print)
-        m.heads(console.log)
-      })
-    })
-  })
-})

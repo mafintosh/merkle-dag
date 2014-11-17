@@ -1,5 +1,6 @@
 message Node {
   required string key = 1;
-  required bytes value = 2;
-  repeated string links = 3;
+  required uint32 change = 2;
+  required bytes value = 3;
+  repeated string links = 4 [packed = true];
 }

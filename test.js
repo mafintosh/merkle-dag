@@ -28,7 +28,7 @@ tape('get heads', function(t) {
   graph.add(null, 'hello', function(err, node) {
     graph.add([node.key], 'world', function(err, head) {
       graph.heads(function(err, heads) {
-        t.same(heads, [head.key], 'heads match')
+        t.same(heads, [head], 'heads match')
         t.end()
       })
     })
