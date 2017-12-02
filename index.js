@@ -156,12 +156,19 @@ Merkle.prototype.get = function(key, cb) {
   })
 }
 
-Merkle.prototype.add = function(links, value, cb) {
+Merkle.prototype.add = function(links, value, key, cb) {
+  if (typeof key === 'function') {
+    cb = key
+    key = null;
+  }
+
   if (typeof value === 'string') value = new Buffer(value)
   if (!links) links = []
   if (!Array.isArray(links)) links = [links]
 
-  var key = shasum(shasum(value)+links.sort().join(''))
+  if (!key)
+    key = shasum(shasum(value)+links.sort().join(''))
+
   var node = {key:key, change:0, value:value, links:links}
 
   write(this, node, cb || noop)

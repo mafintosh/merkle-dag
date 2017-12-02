@@ -30,13 +30,15 @@ graph.add(null, 'hello', function(err, node) {
 
 ## API
 
-#### `var node = graph.add(links, value, [callback])`
+#### `var node = graph.add(links, value, [key], [callback])`
 
 Add a new node to the graph. `links` should be an array of keys of other nodes this node links to.
 If this node does not link to anything pass in `null` or an empty array.
 
 The links *must* be present in the graph or else an error will be passed to the callback.
 The node that will be inserted is returned (and passed to the callback).
+
+key is optional, will use hash of value + links if not provided.
 
 #### `graph.get(key, callback)`
 
